@@ -66,8 +66,9 @@ ENV DISCORD_WEBHOOK_URL=""
 ENV TZ=UTC
 
 # Copy wrapper script only
-COPY scripts/entrypoint-wrapper.sh /home/ubuntu/entrypoint-wrapper.sh
-RUN chmod +x /home/ubuntu/entrypoint-wrapper.sh
+# NOTE: we renamed entrypoint-wrapper to enterpoint, did this break anything?
+COPY entrypoint.sh /home/ubuntu/entrypoint.sh
+RUN chmod +x /home/ubuntu/entrypoint.sh
 
 # Configure timezone at build time default; runtime TZ env var is respected
 # by glibc automatically — no symlink needed at runtime
@@ -77,4 +78,4 @@ WORKDIR /home/ubuntu
 
 # Container starts as root so the entrypoint can fix volume ownership,
 # then drops to the ubuntu user via gosu
-ENTRYPOINT ["/home/ubuntu/entrypoint-wrapper.sh"]
+ENTRYPOINT ["/home/ubuntu/entrypoint.sh"]

@@ -1,54 +1,3 @@
-#!/bin/bash
-set -e
-
-# --- DROP PRIVILEGES ---
-# If running as root, match the ubuntu user's UID/GID to the volume owner
-# so the server process can read/write the mounted directory without the
-# host user needing to chmod or chown anything.
-if [ "$(id -u)" = "0" ]; then
-    VOLUME_UID=$(stat -c '%u' "${SERVERDIR:-/home/ubuntu/Steam}" 2>/dev/null || echo "1000")
-    VOLUME_GID=$(stat -c '%g' "${SERVERDIR:-/home/ubuntu/Steam}" 2>/dev/null || echo "1000")
-    # If the volume is owned by root (e.g. not yet mounted / empty), fall back to 1000
-    if [ "$VOLUME_UID" = "0" ]; then
-        VOLUME_UID=1000
-        VOLUME_GID=1000
-    fi
-    groupmod -g "$VOLUME_GID" ubuntu 2>/dev/null || true
-    usermod  -u "$VOLUME_UID" ubuntu 2>/dev/null || true
-    # Only chown internal dirs — do NOT recurse into the bind-mounted volume
-    chown ubuntu:ubuntu /home/ubuntu
-    chown -R ubuntu:ubuntu /home/ubuntu/steamcmd
-    chown -R ubuntu:ubuntu /home/ubuntu/Steam
-    exec gosu ubuntu "$0" "$@"
-fi
-
-# --- ENVIRONMENT VARIABLES ---
-APPID=4019830
-SERVERDIR="${SERVERDIR:-/home/ubuntu/Steam}"
-CONFIGFILE="$SERVERDIR/RSDragonwilds/Saved/Config/LinuxServer/DedicatedServer.ini"
-BACKUPDIR="$SERVERDIR/backup"
-LOGFILE="$SERVERDIR/RSDragonwilds/Saved/Logs/entrypoint.log"
-LAST_ACTIVITY_FILE="$SERVERDIR/.last_activity"
-PLAYER_COUNT_FILE="$SERVERDIR/.player_count"
-SERVER_RESTART_FILE="$SERVERDIR/.server_restart"
-LAST_BACKUP_DATE_FILE="$SERVERDIR/.last_backup_date"
-LAST_APPLIED_BUILD_FILE="$SERVERDIR/.last_applied_build"
-UPDATE_IN_PROGRESS_FILE="$SERVERDIR/.update_in_progress"
-BACKUP_IN_PROGRESS_FILE="$SERVERDIR/.backup_in_progress"
-SERVER_PORT="${SERVER_PORT:-7777}"
-ENABLE_AUTO_UPDATE="${ENABLE_AUTO_UPDATE:-true}"
-UPDATE_TIME="${UPDATE_TIME:-3600}"              # How often (seconds) to check for updates (e.g. 3600 = every hour)
-ENABLE_DISCORD_NOTIF="${ENABLE_DISCORD_NOTIF:-false}"
-DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
-IDLE_WAIT="${IDLE_WAIT:-360}"
-BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
-PLAYER_CHECK_INTERVAL=5
-BACKUP_AFTER_UPDATE="${BACKUP_AFTER_UPDATE:-true}"
-BACKUP_DAILY="${BACKUP_DAILY:-true}"
-BACKUP_TIME="${BACKUP_TIME:-3:00 AM}"           # Time-of-day to run daily backup (12-hour format)
-POLL_INTERVAL="${POLL_INTERVAL:-60}"            # How often (seconds) the backup loop checks the schedule
-
-
 HOME=/home/ubuntu
 mkdir -p "$BACKUPDIR" "$SERVERDIR/steamapps" "$(dirname "$LOGFILE")"
 
@@ -82,6 +31,60 @@ install_or_verify_server() {
     done
     log "=== SteamCMD install/verify complete ==="
     send_discord "✅ Dragonwilds Dedicated Server installed."
+}
+
+# -- DEDICATEDSERVER.INI ---
+#
+# Generate the ini file if needed, then provide it with (at least) the OwnerId
+# This avoids an otherwise unnecessary restart during first-time setup that
+# occurs in the standard flow where the server generates its own ini file but
+# lacks the OwnerId.
+#
+# This will also update the ini file each time the container starts, making it
+# a little easier to change server settings via environment
+
+prepare_dedicated_server_ini() {
+    set_key() {
+        local key="$1"
+        local new_value="$2"
+
+        # key present?
+        if [[ -z "$key" ]]; then echo "Error: Key required."; return 1; fi
+
+        # kvp present?
+        if grep -qE "^[[:space:]]*$key=" "$CONFIGFILE"; then
+            # value present?
+            if [[ ! -z "$new_value" ]]; then
+                # replace key
+                sed -i.bak -E "s|^([[:space:]]*$key=).*|\1$new_value|" "$CONFIGFILE"
+            fi
+        else # append key
+            echo "$key=$new_value" >> "$CONFIGFILE"
+        fi
+    }
+
+    create_config_file() {
+        echo "Config file '$CONFIGFILE' not found, creating."
+        mkdir -p "$(dirname "$CONFIGFILE")" && touch "$CONFIGFILE"
+
+        # Add metadata and section header
+        echo ";METADATA=(Diff=true, UseCommands=true)" >> "$CONFIGFILE"
+        echo "[/Script/Dominion.DedicatedServerSettings]" >> "$CONFIGFILE"
+    }
+
+    # Config.presence
+    if [[ ! -f "$CONFIGFILE" ]]; then create_config_file; fi
+
+    set_key "OwnerId"          "${OWNER_ID}"
+    set_key "ServerGuid"       "${SERVER_GUID}"
+    set_key "AdminPassword"    "${ADMIN_PASSWORD:-$(openssl rand -hex 16 | tr 'a-f' 'A-F')}"
+    set_key "ServerName"       "${SERVER_NAME:-Server-$(date +%s)}"
+    set_key "DefaultWorldName" "${DEFAULT_WORLD_NAME:-World-$(date +%s)}"
+    set_key "WorldPassword"    "${WORLD_PASSWORD}"
+
+    # private function cleanup
+    unset -f set_key
+    unset -f create_config_file
 }
 
 # --- START SERVER ---
@@ -388,6 +391,7 @@ if [ ! -f "$BINARY" ]; then
     install_or_verify_server
 fi
 
+prepare_dedicated_server_ini
 start_server
 monitor_players
 
